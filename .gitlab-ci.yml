@@ -1,0 +1,135 @@
+# Note: This GitLab CI configuration is used for internal testing, users can ignore it.
+
+# Global --------------------------
+
+image: python:3.10
+
+variables:
+  PIP_CACHE_DIR: "${CI_PROJECT_DIR}/.cache/pip"
+
+cache:
+  key:
+    prefix: ${CI_JOB_IMAGE}
+    files:
+      - pyproject.toml
+      - poetry.lock
+  paths:
+    - .cache/pip
+    - .venv
+
+stages:
+  - check
+  - build
+  - test
+  - publish
+
+before_script:
+  - pip install poetry
+  - poetry --version
+  - poetry config virtualenvs.in-project true
+  - poetry install -vv
+
+# stage: check ----------------------
+
+black:
+  stage: check
+  script: poetry run black --check .
+
+flake8:
+  stage: check
+  script: poetry run flake8 deepl tests
+
+# stage: build ----------------------
+
+package:
+  stage: build
+  script:
+    - poetry build --verbose --no-interaction
+  artifacts:
+    paths:
+      - dist/
+
+# stage: test -------------------------
+
+.use-test-server-template: &use_test_server_template
+  secrets:
+    DEEPL_AUTH_KEY:
+      vault: jenkins/client_libraries/test_auth_key@backend
+      file: false
+    DEEPL_SERVER_URL:
+      vault: jenkins/client_libraries/test_server_url@backend
+      file: false
+
+test:
+  <<: *use_test_server_template
+  stage: test
+  services:
+    - name: $DOCKER_REGISTRY/deepl/deepl-mock
+      alias: deepl-mock
+  parallel:
+    matrix:
+      - DOCKER_IMAGE: "python:3.10"
+      - DOCKER_IMAGE: "python:3.6"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.7"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.8"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.9"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.10"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.6"
+        EXTRA_POETRY_ADD_ARGUMENT: "requests@2.0"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.9"
+        EXTRA_POETRY_ADD_ARGUMENT: "requests@2.0"
+        USE_MOCK_SERVER: "use mock server"
+      - DOCKER_IMAGE: "python:3.10"
+        # Set minimum possible requests and urllib3 versions to work with Python 3.10
+        EXTRA_POETRY_ADD_ARGUMENT: "requests@2.20 urllib3@1.23"
+        USE_MOCK_SERVER: "use mock server"
+  image: ${DOCKER_IMAGE}
+  script:
+    - >
+      if [[ ! -z "${EXTRA_POETRY_ADD_ARGUMENT}" ]]; then
+        echo "Running poetry add ${EXTRA_POETRY_ADD_ARGUMENT}"
+        poetry add ${EXTRA_POETRY_ADD_ARGUMENT}
+      fi
+    - >
+      if [[ ! -z "${USE_MOCK_SERVER}" ]]; then
+        echo "Using mock server"
+        export DEEPL_SERVER_URL=http://deepl-mock:3000
+        export DEEPL_MOCK_SERVER_PORT=3000
+        export DEEPL_PROXY_URL=http://deepl-mock:3001
+        export DEEPL_MOCK_PROXY_SERVER_PORT=3001
+      fi
+    - poetry run coverage run -m pytest --junit-xml test_report.xml
+    - poetry run coverage report
+    - poetry run coverage xml
+  artifacts:
+    reports:
+      cobertura:
+        - coverage.xml
+      junit:
+        - test_report.xml
+    when: always
+
+# stage: publish -------------------------
+
+pypi upload:
+  stage: publish
+  dependencies:
+    - package
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - poetry publish --verbose --no-interaction --username $PYPI_USERNAME --password $PYPI_PASSWORD
+  secrets:
+    PYPI_USERNAME:
+      vault: jenkins/client_libraries/pypi_username@backend
+      file: false
+    PYPI_PASSWORD:
+      vault: jenkins/client_libraries/pypi_password@backend
+      file: false
+
